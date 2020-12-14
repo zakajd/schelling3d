@@ -3,62 +3,141 @@ from scipy.signal import convolve
 import itertools
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import imageio
 from tqdm.auto import tqdm
 from mpl_toolkits.mplot3d import Axes3D # 3D plotting
 
-
 # Same functions for 3D case
 def init_map_3d(N, C=2):
     """
-    N: map size NxNxN
-    C: number of different players (default=2)
+    Args:
+        N: Cubic map size
+        C: Number of different populations. Default: 2
+        empty: % of field left empty. Default: 10%
+
+    Returns:
+        result: Array of shape (C, N, N, N)
     """
-    board = np.random.random_sample((N, N, N))
-    result = np.zeros((C, N, N, N), dtype=np.uint8)
-    for c in range(C):
-        result[c] = ((1 / C) * c < board) * (board <= (1 / C) * (c + 1))
-    return result
+    board = torch.rand((N, N, N))
+    game_map = torch.stack([((1 / C) * c < board) * (board <= (1 / C) * (c + 1)) for c in range(C)])
+    return game_map.to(torch.float)
 
 def compress_3d(game_map):
     """
-    Convert CxNxNxN matrix into NxNxN
+    Args:
+        game_map: Array of shape (C, N, N, N)
+    
+    Returns:
+        compressed_map: Array of shape (N, N, N)
     """
-    C, N, N, N = game_map.shape
-    result = np.zeros((N, N, N))
+    C, N, _, _ = game_map.shape
+    result = torch.zeros(N, N, N)
     for c in range(C):
         result += game_map[c] * c
-    return result.astype(game_map.dtype)
+    return result.to(game_map)
 
-def decompress_3d(game_map_3d, N, C):
+
+def decompress_3d(game_map_3d, C):
     """
-    Decompresses 3D array into 4D array
-    Expects input to be N x N x N array
-    returns C x N x N x N array
+    Args:
+        game_map_3d: Compressed map of shape (N, N, N)
+        C: Number of channels
+
+    Returns:
+        decompress_map: Array of shape (C, N, N, N)
     """
-    
-    result = np.zeros((C, N, N, N))
+    N = game_map_3d.shape[0]
+    result = torch.zeros(C, N, N, N)
     for c in range(C):
         result[c] = (game_map_3d == c)
-    return result.astype(game_map_3d.dtype)
+    return result.to(game_map_3d)
 
-def game_step_3d(game_map, r):
+
+def get_kernel_3d(distance, kernel_size):
+    if distance == 'L2':
+        kernel_3d = torch.ones(kernel_size, kernel_size, kernel_size)
+        kernel_3d[kernel_size // 2, kernel_size // 2, kernel_size // 2] = 0 # 3D cube with 0 in center
+    elif distance == 'L1':
+        if kernel_size == 3:
+            kernel_3d = torch.tensor([
+                [[0, 0, 0],
+                [0, 1, 0],
+                [0, 0, 0]],
+
+                [[0, 1, 0],
+                [1, 0, 1],
+                [0, 1, 0]],
+
+                [[0, 0, 0],
+                [0, 1, 0],
+                [0, 0, 0]]])
+
+        elif kernel_size == 5:
+            kernel_3d = torch.tensor([
+                [[0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0]],
+                
+                [[0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 0, 0, 0, 0]],
+                
+                [[0, 0, 1, 0, 0],
+                [0, 1, 1, 1, 0],
+                [1, 1, 0, 1, 1],
+                [0, 1, 1, 1, 0],
+                [0, 0, 1, 0, 0]],
+                
+                [[0, 0, 0, 0, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 1, 1, 1, 0],
+                [0, 0, 0, 0, 0]],
+                
+                [[0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0]]])
+        else:
+            raise ValueError("Kernel size not supported")
+    else:
+        raise ValueError("Only `L2` and `L1` distance is supported")
+        
+    return kernel_3d
+    
+    
+def game_step_3d(game_map: torch.Tensor, r: float, distance: str = 'L2', kernel_size: int = 3):
     """
-    Takes 4D matrix as input, 
-    Returns changed 4D matrix as output
+    Args:
+        game_map: Array of shape (C, N, N, N)
+        r: Tolerance value. If less than r% of neighbours are of the same class, cell whants to move.
+        distance: One of {`L2`, `L1`}.
+        kernel_size: Size of neighbourhood to look at.
+    Returns:
+        updated_map: New game map
+        num_moving: Number of cells moved on this step
     """
     
     C, N, N, N = game_map.shape
     
-    kernel_3d = np.ones((3, 3, 3)) 
-    kernel_3d[1, 1, 1] = 0 # 4D cube with 0 in center 
-    
+    kernel_3d = get_kernel_3d(distance, kernel_size).to(game_map)
     compressed_map = compress_3d(game_map)
-    # Convolve with 3x3x3 kernel of ones having hole in the centre.
+
     # max is just fancy way to compress 4D array into 3D
-    neighbours_4d = np.zeros((C, N, N, N))
+    neighbours_4d = torch.zeros(C, N, N, N).to(game_map)
     for c in range(C):
-        neighbours_4d[c] = convolve(game_map[c], kernel_3d, mode='same', method='direct')
+        neighbours_4d[c] = torch.nn.functional.conv3d(
+            game_map[c][None, None, ...], kernel_3d[None, None, ...], padding=kernel_size // 2, stride=1)
+        
+#         neighbours_4d[c] = torch.nn.functional.conv2d(
+#             game_map[c][None, ...], kernel_3d[None, ...], padding=kernel_size // 2, stride=1)
+        
     neighbours_4d *= game_map
     neighbours = neighbours_4d.max(axis=0)
 
@@ -66,66 +145,92 @@ def game_step_3d(game_map, r):
     num_moving = moving.sum()
     
     compressed_map = compress_3d(game_map)
+    
     moving_colors = compressed_map[moving]
-    np.random.shuffle(moving_colors)
-    compressed_map[moving] = moving_colors
+    idx = torch.randperm(moving_colors.nelement())
+    compressed_map[moving] = moving_colors.view(-1)[idx].view(moving_colors.size())
     
     updated_map = decompress_3d(compressed_map, N, C)
     return updated_map, num_moving
 
-def game_3d(N, C, r, game_length, name=None, proj=False, figsize=(14,11), fps=3, verbouse=False):
+def game_3d(
+        N, C, r=0.3, game_length=30, distance: str = 'L2', kernel_size: int = 3,
+        create_gif=False, proj=False, device="cpu"):
     """
-    Launch a game with board of size N x N x N, C colours and `game_length`
-    r: % of neighbours of the same colour
-    proj: % save projections instead of 3D plane
+    Start an iterative moving process. 
+    
+    Args:
+        N: Size of game board
+        C: Number of different populations
+        r: Tolerance value. If less than r% of neighbours are of the same class, cell whants to move.
+        game_length: Number of iterations
+        distance: One of {`L2`, `L1`}.
+        kernel_size: Size of neighbourhood to look at.
+        create_gif: Flag to save game as GIF
+        proj: Flag to save projections on 3 axes instead of 3D plane
+    
+    Returns:
+        game_map:
+        move_hist: Number of cells that moved at each iteration
     """
-    assert r<= 1, "Wrong r value! 0 <= r <= 1"
-    game_map = init_map_3d(N,C)
-    if verbouse:
+    assert r <= 1, "Wrong r value! 0 <= r <= 1"
+    game_map = init_map_3d(N, C).to(device)
+    
+    FIGSIZE = (14, 11)
+    if create_gif:
         # Plot inital conditions
         x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
         if N < 20: # With big N makes no sence
-            plot_3d(x, y, z, c, r=r, save_image=False, figsize=figsize)
+            plot_3d(x, y, z, c, r=r, save_image=False, figsize=FIGSIZE)
         plot_projections(proj_x, proj_y, proj_z)
-    
+        
+    name = f'schelling3d_size-{N}_C-{C}_dist-{distance}_ks-{kernel_size}_neigh-{int(r*27)}'
+    fname = 'imgs/schelling3d_tmp.png'
+
     move_hist = []
     images = []
-    fname = f'imgs/{name}.png'
+    
     for i in tqdm(range(game_length), desc=f'Number of neighbours={int(r*27)}', leave=False):
         game_map, moved = game_step_3d(game_map, r)
         x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
         if proj:
             plot_projections(proj_x, proj_y, proj_z, save_image=True, name=fname)
         else:
-            plot_3d(x, y, z, c, r=r, save_image=True, name=fname, figsize=figsize)
+            plot_3d(x, y, z, c, r=r, save_image=True, name=fname, figsize=FIGSIZE)
         images.append(imageio.imread(fname))
         os.remove(fname)
         move_hist.append(moved)
 
-    fname = f'imgs/{name}.gif'
-    imageio.mimsave(fname, images, fps = fps)
+    imageio.mimsave(f'imgs/{name}.gif', images, fps = 10)
     
-    if verbouse:
+    if create_gif:
         # Plot final conditions
         x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
         if N < 20: # With big N makes no sence
-            plot_3d(x, y, z, c, r=r, save_image=False, figsize=figsize)
+            plot_3d(x, y, z, c, r=r, save_image=False, figsize=FIGSIZE)
         plot_projections(proj_x, proj_y, proj_z)
     
     return game_map, move_hist
 
 def prepare_3d_plot(game_map, projections=False):
     """
+    Args:
+        game_map: Array of shape (C, N, N, N)
+    
+    Return:
+        
     Takes CxNxNxN matrix and return 
     N^3 x 4 matrix (x, y, z and colour channels)
     """
-    C, N, N, N = game_map.shape
+    C, N, _, _ = game_map.shape
+    assert C == 2, "Only 2 colours are supported!"
     game_map_3d = compress_3d(game_map)
-    xyz = np.array(list(itertools.product(range(N), range(N), range(N))))
-    x = xyz[:,0]
-    y = xyz[:,1]
-    z = xyz[:,2]
+    xyz = torch.tensor(list(itertools.product(range(N), range(N), range(N))))
+    x = xyz[:, 0]
+    y = xyz[:, 1]
+    z = xyz[:, 2]
     c = game_map_3d.reshape(-1)
+    
     if C == 2:
         # delete entries for one of the colours
         mask = (c ==1)
@@ -139,7 +244,7 @@ def prepare_3d_plot(game_map, projections=False):
             return x, y, z, c, proj_x, proj_y, proj_z
             
     return x, y, z, c
-
+ 
 def plot_projections(proj_x, proj_y, proj_z, save_image=False, name=None):
     fig, ax = plt.subplots(ncols=3, figsize=(15,5))
 #     fig.suptitle('test title', fontsize=10)
@@ -174,4 +279,3 @@ def plot_3d(x, y, z, c, r=None, save_image=False, name=None, figsize=(14, 11)):
     if save_image:
         plt.savefig(name)
         plt.close()
-                     
