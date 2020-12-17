@@ -1,14 +1,14 @@
 import os
-from scipy.signal import convolve
 import itertools
-import matplotlib.pyplot as plt
-import numpy as np
+
 import torch
 import imageio
+import pygifsicle
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D # 3D plotting
 
-# Same functions for 3D case
+
 def init_map_3d(N, C=2):
     """
     Args:
@@ -23,6 +23,7 @@ def init_map_3d(N, C=2):
     game_map = torch.stack([((1 / C) * c < board) * (board <= (1 / C) * (c + 1)) for c in range(C)])
     return game_map.to(torch.float)
 
+
 def compress_3d(game_map):
     """
     Args:
@@ -32,7 +33,7 @@ def compress_3d(game_map):
         compressed_map: Array of shape (N, N, N)
     """
     C, N, _, _ = game_map.shape
-    result = torch.zeros(N, N, N)
+    result = torch.zeros(N, N, N, device=game_map.device)
     for c in range(C):
         result += game_map[c] * c
     return result.to(game_map)
@@ -137,9 +138,9 @@ def game_step_3d(game_map: torch.Tensor, r: float, distance: str = 'L2', kernel_
         
 #         neighbours_4d[c] = torch.nn.functional.conv2d(
 #             game_map[c][None, ...], kernel_3d[None, ...], padding=kernel_size // 2, stride=1)
-        
+
     neighbours_4d *= game_map
-    neighbours = neighbours_4d.max(axis=0)
+    neighbours = neighbours_4d.max(axis=0).values
 
     moving = neighbours < int(kernel_3d.sum() * r)
     num_moving = moving.sum()
@@ -150,7 +151,7 @@ def game_step_3d(game_map: torch.Tensor, r: float, distance: str = 'L2', kernel_
     idx = torch.randperm(moving_colors.nelement())
     compressed_map[moving] = moving_colors.view(-1)[idx].view(moving_colors.size())
     
-    updated_map = decompress_3d(compressed_map, N, C)
+    updated_map = decompress_3d(compressed_map, C)
     return updated_map, num_moving
 
 def game_3d(
@@ -176,7 +177,7 @@ def game_3d(
     assert r <= 1, "Wrong r value! 0 <= r <= 1"
     game_map = init_map_3d(N, C).to(device)
     
-    FIGSIZE = (14, 11)
+    FIGSIZE = (8, 8)
     if create_gif:
         # Plot inital conditions
         x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
@@ -190,25 +191,32 @@ def game_3d(
     move_hist = []
     images = []
     
-    for i in tqdm(range(game_length), desc=f'Number of neighbours={int(r*27)}', leave=False):
+    for i in tqdm(range(game_length), desc=f'Number of neighbours={int(r*27)}', leave=False, disable=not create_gif):
         game_map, moved = game_step_3d(game_map, r)
-        x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
-        if proj:
-            plot_projections(proj_x, proj_y, proj_z, save_image=True, name=fname)
-        else:
-            plot_3d(x, y, z, c, r=r, save_image=True, name=fname, figsize=FIGSIZE)
-        images.append(imageio.imread(fname))
-        os.remove(fname)
+        
+        if create_gif:
+            x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
+            if proj:
+                plot_projections(proj_x, proj_y, proj_z, save_image=True, name=fname)
+            else:
+                plot_3d(x, y, z, c, r=r, save_image=True, name=fname, figsize=FIGSIZE)
+            
+            images.append(imageio.imread(fname))
+            os.remove(fname)
+        
         move_hist.append(moved)
 
-    imageio.mimsave(f'imgs/{name}.gif', images, fps = 10)
-    
     if create_gif:
         # Plot final conditions
         x, y, z, c, proj_x, proj_y, proj_z = prepare_3d_plot(game_map, projections=True)
+        
         if N < 20: # With big N makes no sence
             plot_3d(x, y, z, c, r=r, save_image=False, figsize=FIGSIZE)
         plot_projections(proj_x, proj_y, proj_z)
+        
+        fname = f'imgs/{name}.gif'
+        imageio.mimsave(fname, images, fps = 10)
+        pygifsicle.optimize(fname)
     
     return game_map, move_hist
 
@@ -224,7 +232,7 @@ def prepare_3d_plot(game_map, projections=False):
     """
     C, N, _, _ = game_map.shape
     assert C == 2, "Only 2 colours are supported!"
-    game_map_3d = compress_3d(game_map)
+    game_map_3d = compress_3d(game_map).cpu()
     xyz = torch.tensor(list(itertools.product(range(N), range(N), range(N))))
     x = xyz[:, 0]
     y = xyz[:, 1]
@@ -262,7 +270,7 @@ def plot_projections(proj_x, proj_y, proj_z, save_image=False, name=None):
         plt.savefig(name)
         plt.close()
     
-def plot_3d(x, y, z, c, r=None, save_image=False, name=None, figsize=(14, 11)):
+def plot_3d(x, y, z, c, r=None, save_image=False, name=None, figsize=(7, 7)):
     fig = plt.figure(figsize=figsize)
     ax = plt.axes(projection='3d')
 #     ax = plt.axes()
@@ -274,7 +282,7 @@ def plot_3d(x, y, z, c, r=None, save_image=False, name=None, figsize=(14, 11)):
         ax.scatter(x, y, z, c=c, linewidth=0.5, marker='.')
     ax.set_axis_off()
     if r:
-        ax.set_title(f'3D model with r={r}', fontsize=20)
+        ax.set_title(f'3D model with r={r:0.3f}', fontsize=20)
         
     if save_image:
         plt.savefig(name)

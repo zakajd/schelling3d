@@ -1,15 +1,12 @@
-# On PyTorch
-import torch
-from scipy.signal import convolve2d
-import itertools
-import matplotlib.pyplot as plt
-from matplotlib import animation
-import numpy as np
-import imageio
 import os
+import itertools
+
+import torch
+import imageio
+import pygifsicle
 from tqdm.auto import tqdm
-from mpl_toolkits.mplot3d import Axes3D # 3D plotting
-from functools import wraps
+import matplotlib.pyplot as plt
+
 
 def init_map_2d(N, C=2):
     """
@@ -21,7 +18,7 @@ def init_map_2d(N, C=2):
     Returns:
         result: Array of shape (C, N, N)
     """
-    board = torch.rand((N, N))
+    board = torch.rand(N, N)
     game_map = torch.stack([((1 / C) * c < board) * (board <= (1 / C) * (c + 1)) for c in range(C)])
     return game_map.to(torch.float)
 
@@ -34,7 +31,7 @@ def compress_2d(game_map):
         compressed_map: Array of shape (N, N)
     """
     C, N, _ = game_map.shape
-    result = torch.zeros(N, N)
+    result = torch.zeros(N, N, device=game_map.device)
     for c in range(C):
         result += game_map[c] * c
     return result.to(game_map)
@@ -129,17 +126,19 @@ def game_2d(N, C, r=0.3, game_length=30, distance: str = 'L2', kernel_size: int 
     assert r <= 1, "Wrong r value! 0 <= r <= 1"
     game_map = init_map_2d(N, C).to(device)
     name = f'schelling2d_size-{N}_C-{C}_dist-{distance}_ks-{kernel_size}_neigh-{int(r*8)}'
+    fname = 'imgs/schelling2d_tmp.png'
+    
     move_hist = []
     images = []
-    for i in tqdm(range(game_length),desc=f'Number of neighbours={int(r*8)}', leave=False):
+    for i in tqdm(range(game_length),desc=f'Number of neighbours={int(r*8)}', leave=False, disable=not create_gif):
         # Return torch.tensor
         game_map, moved = game_step_2d(game_map, r, distance='L2', kernel_size=3)
         
         if create_gif:
             game_map_2d = compress_2d(game_map)
-            fname = f'imgs/{name}.png'
             plot_2d(game_map_2d, C=C, r=r, i=i, save_image=True, name=fname, figsize=(14,11))
             images.append(imageio.imread(fname))
+#             print(images[-1].shape)
             os.remove(fname)
 
         move_hist.append(moved)
@@ -147,6 +146,7 @@ def game_2d(N, C, r=0.3, game_length=30, distance: str = 'L2', kernel_size: int 
     if create_gif:
         fname = f'imgs/{name}.gif'
         imageio.mimsave(fname, images, fps = 10)
+        pygifsicle.optimize(fname)
     return move_hist
         
 def prepare_2d_plot(game_map):
@@ -160,7 +160,7 @@ def prepare_2d_plot(game_map):
 def plot_2d(game_map_2d, C=2, r=None, i=None, save_image=False, name=None, figsize=(14,11)):
     plt.figure(figsize=figsize)
     
-    plt.imshow(game_map_2d.numpy())
+    plt.imshow(game_map_2d.cpu().numpy())
 #     if C > 2:
 #         plt.imshow(game_map_2d)
 #     else:
